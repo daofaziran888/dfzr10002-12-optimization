@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { request } from '@/api/client'
 
 const ENDPOINT = '/api/chart'
+const PAGE_SIZE = 3
 const columns = [
   "图表编号",
   "图表名称",
@@ -18,55 +19,78 @@ const actions = [
   "启用配置",
   "停用配置"
 ]
-const statuses = [
-  "草稿",
-  "待校验",
-  "已启用",
-  "已停用"
-]
-const stats = [
-  {
-    "label": "图表配置总数",
-    "value": 0
-  },
-  {
-    "label": "待校验图表",
-    "value": 0
-  },
-  {
-    "label": "已启用图表",
-    "value": 0
-  }
-]
 
 type Row = Record<string, string | number | null>
+type SortOrder = 'asc' | 'desc'
+
+interface PagePayload {
+  items: Row[]
+  total: number
+  page: number
+  size: number
+}
 
 export default function ChartView() {
   const [rows, setRows] = useState<Row[]>([])
   const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
   const [errorMessage, setErrorMessage] = useState('')
-  const [filters, setFilters] = useState<Record<string, string>>({})
-  const filterFields = useMemo(() => columns.slice(0, 3), [])
+  // 输入态与已生效查询条件分离：翻页、排序都带着已生效条件，输入过程不触发请求。
+  const [keywordInput, setKeywordInput] = useState('')
+  const [statusInput, setStatusInput] = useState('')
+  const [query, setQuery] = useState<{ keyword: string; status: string }>({ keyword: '', status: '' })
+  const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
+
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(total / PAGE_SIZE)), [total])
 
   const reload = useCallback(async () => {
     setErrorMessage('')
-    const query = new URLSearchParams(filters).toString()
+    const params = new URLSearchParams()
+    if (query.keyword) {
+      params.set('keyword', query.keyword)
+    }
+    if (query.status) {
+      params.set('status', query.status)
+    }
+    // 筛选条件、排序与分页范围同时生效：后端先过滤排序再分页。
+    params.set('sort_by', '刷新间隔')
+    params.set('order', sortOrder)
+    params.set('page', String(page))
+    params.set('size', String(PAGE_SIZE))
     try {
-      const response = await request(`${ENDPOINT}?${query}`)
+      const response = await request(`${ENDPOINT}?${params.toString()}`)
       if (!response.ok) {
         throw new Error('图表配置列表读取失败')
       }
-      const payload = await response.json()
+      const payload = (await response.json()) as PagePayload
       setRows(payload.items ?? [])
       setTotal(payload.total ?? 0)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : '可视化图表配置列表读取失败')
     }
-  }, [filters])
+  }, [query, sortOrder, page])
 
   useEffect(() => {
     void reload()
   }, [reload])
+
+  // 查询条件变化时回到第一页，但排序变化保留当前页定位。
+  function submitSearch(event: React.FormEvent) {
+    event.preventDefault()
+    setPage(1)
+    setQuery({ keyword: keywordInput.trim(), status: statusInput })
+  }
+
+  function resetSearch() {
+    setKeywordInput('')
+    setStatusInput('')
+    setQuery({ keyword: '', status: '' })
+    setPage(1)
+  }
+
+  function toggleSort() {
+    setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+  }
 
   async function runAction(action: string, row: Row) {
     setErrorMessage('')
@@ -101,34 +125,45 @@ export default function ChartView() {
         </div>
       </header>
 
-      <div className="stat-row">
-        {stats.map((item) => (
-          <article key={item.label} className="stat-card">
-            <span className="stat-label">{item.label}</span>
-            <strong className="stat-value">{item.value}</strong>
-          </article>
-        ))}
-      </div>
-
-      <form className="filter-bar" onSubmit={(event) => { event.preventDefault(); void reload() }}>
-        {filterFields.map((field) => (
-          <label key={field} className="filter-item">
-            <span>{field}</span>
-            <input
-              value={filters[field] ?? ''}
-              placeholder={`按${field}检索`}
-              onChange={(event) => setFilters((prev) => ({ ...prev, [field]: event.target.value }))}
-            />
-          </label>
-        ))}
-        <button className="btn" type="submit">查询</button>
-        <button className="btn ghost" type="button" onClick={() => setFilters({})}>重置条件</button>
+      <form className="filter-bar" onSubmit={submitSearch}>
+        <label className="filter-item">
+          <span>图表编号检索</span>
+          <input
+            value={keywordInput}
+            placeholder="按图表编号检索，如 CHAR-000"
+            onChange={(event) => setKeywordInput(event.target.value)}
+          />
+        </label>
+        <label className="filter-item">
+          <span>配置状态</span>
+          <select value={statusInput} onChange={(event) => setStatusInput(event.target.value)}>
+            <option value="">全部状态</option>
+            <option value="草稿">草稿</option>
+            <option value="待校验">待校验</option>
+            <option value="已启用">已启用</option>
+            <option value="已停用">已停用</option>
+          </select>
+        </label>
+        <button className="btn primary" type="submit">查询</button>
+        <button className="btn ghost" type="button" onClick={resetSearch}>重置条件</button>
+        <button className="btn" type="button" onClick={toggleSort}>
+          刷新间隔{sortOrder === 'asc' ? '升序 ↑' : '降序 ↓'}
+        </button>
       </form>
 
       <table className="data-table">
         <thead>
           <tr>
-            {columns.map((column) => <th key={column}>{column}</th>)}
+            {columns.map((column) => (
+              <th key={column}>
+                {column}
+                {column === '刷新间隔' && (
+                  <button className="link sort-link" type="button" onClick={toggleSort}>
+                    {sortOrder === 'asc' ? '↑' : '↓'}
+                  </button>
+                )}
+              </th>
+            ))}
             <th>可执行动作</th>
           </tr>
         </thead>
@@ -153,8 +188,35 @@ export default function ChartView() {
         </tbody>
       </table>
 
-      <footer className="page-foot">
-        <span>共 {total} 条可视化图表配置记录</span>
+      <footer className="page-foot pagination-foot">
+        <span>
+          共 {total} 条记录，第 {page} / {totalPages} 页
+          {query.keyword && ` · 编号含「${query.keyword}」`}
+          {query.status && ` · 状态「${query.status}」`}
+        </span>
+        <span className="pagination">
+          <button className="btn" type="button" disabled={page <= 1} onClick={() => setPage((prev) => Math.max(1, prev - 1))}>
+            上一页
+          </button>
+          {Array.from({ length: totalPages }, (_, index) => index + 1).map((pageNo) => (
+            <button
+              key={pageNo}
+              className={`btn ${pageNo === page ? 'primary' : ''}`}
+              type="button"
+              onClick={() => setPage(pageNo)}
+            >
+              {pageNo}
+            </button>
+          ))}
+          <button
+            className="btn"
+            type="button"
+            disabled={page >= totalPages}
+            onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+          >
+            下一页
+          </button>
+        </span>
         {errorMessage && <span className="error-text">{errorMessage}</span>}
       </footer>
     </section>

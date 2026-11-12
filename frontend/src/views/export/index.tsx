@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { request } from '@/api/client'
+import type { ExportTask } from '@/stores/linkage'
 
 const ENDPOINT = '/api/export'
 const columns = [
@@ -39,7 +40,20 @@ const stats = [
   }
 ]
 
+const TASK_STATUS_CLASS: Record<string, string> = {
+  已完成: 'tag tag-ok',
+  生成中: 'tag tag-running',
+  待生成: 'tag tag-pending',
+  已过期: 'tag tag-stale',
+  已停用: 'tag tag-off',
+}
+
 type Row = Record<string, string | number | null>
+
+function formatTaskFilters(filters: Record<string, string>): string {
+  const entries = Object.entries(filters)
+  return entries.length === 0 ? '—' : entries.map(([key, value]) => `${key}=${value}`).join('，')
+}
 
 export default function ExportView() {
   const [rows, setRows] = useState<Row[]>([])
@@ -47,6 +61,9 @@ export default function ExportView() {
   const [errorMessage, setErrorMessage] = useState('')
   const [filters, setFilters] = useState<Record<string, string>>({})
   const filterFields = useMemo(() => columns.slice(0, 3), [])
+  // 图表快照任务台账：与联动看板读同一个接口，结果状态始终和图表配置/数据代次同步。
+  const [tasks, setTasks] = useState<ExportTask[]>([])
+  const [taskKeyword, setTaskKeyword] = useState('')
 
   const reload = useCallback(async () => {
     setErrorMessage('')
@@ -64,9 +81,36 @@ export default function ExportView() {
     }
   }, [filters])
 
+  const reloadTasks = useCallback(async () => {
+    try {
+      const response = await request('/api/linkage/export-tasks')
+      if (response.ok) {
+        const payload = await response.json()
+        setTasks(payload.items ?? [])
+      }
+    } catch {
+      // 台账读取失败不阻断模板列表主流程。
+    }
+  }, [])
+
   useEffect(() => {
     void reload()
   }, [reload])
+
+  useEffect(() => {
+    void reloadTasks()
+    // 每 5 秒拉一次台账，联动看板里筛选结束或图表状态变化后，本入口自动同步结果状态。
+    const timer = setInterval(() => void reloadTasks(), 5000)
+    return () => clearInterval(timer)
+  }, [reloadTasks])
+
+  const visibleTasks = useMemo(() => {
+    const keyword = taskKeyword.trim()
+    if (!keyword) {
+      return tasks
+    }
+    return tasks.filter((task) => task.图表编号.includes(keyword))
+  }, [tasks, taskKeyword])
 
   async function runAction(action: string, row: Row) {
     setErrorMessage('')
@@ -157,6 +201,57 @@ export default function ExportView() {
         <span>共 {total} 条数据导出配置记录</span>
         {errorMessage && <span className="error-text">{errorMessage}</span>}
       </footer>
+
+      <div className="ledger-card export-ledger">
+        <div className="ledger-head">
+          <h3>数据导出任务清单（跟随图表快照）</h3>
+          <input
+            placeholder="按图表编号检索任务"
+            value={taskKeyword}
+            onChange={(event) => setTaskKeyword(event.target.value)}
+          />
+          <button className="btn" type="button" onClick={() => void reloadTasks()}>刷新台账</button>
+        </div>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>任务</th>
+              <th>图表编号</th>
+              <th>图表名称</th>
+              <th>筛选快照</th>
+              <th>数据代次</th>
+              <th>图表状态</th>
+              <th>结果状态</th>
+              <th>创建时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleTasks.slice().reverse().map((task) => (
+              <tr key={task.task_id}>
+                <td>#{task.task_id}</td>
+                <td>{task.图表编号}</td>
+                <td>{task.图表名称}</td>
+                <td>{formatTaskFilters(task.filters)}</td>
+                <td>G{task.generation}</td>
+                <td>{task.chart_status}</td>
+                <td>
+                  <span className={TASK_STATUS_CLASS[task.result_status] ?? 'tag'}>
+                    {task.result_status}
+                  </span>
+                </td>
+                <td>{task.created_at}</td>
+              </tr>
+            ))}
+            {visibleTasks.length === 0 && (
+              <tr>
+                <td className="empty-state" colSpan={8}>
+                  暂无导出任务，可在「全局筛选联动」看板的图表卡上登记
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </section>
   )
 }

@@ -11,6 +11,23 @@ STATUS_ORDER = ["草稿", "待校验", "已启用", "已停用"]
 ACTION_RULES = {"提交校验": "待校验", "启用配置": "已启用", "停用配置": "已停用"}
 NEGATIVE_ACTIONS = ["停用配置"]
 
+# 列表允许的排序字段：键是接口入参，值是记录里的实际字段。
+SORT_FIELDS = {
+    "刷新间隔": "刷新间隔",
+    "图表编号": "图表编号",
+    "id": "id",
+}
+
+
+def _to_sortable(value: Any) -> Any:
+    """刷新间隔在种子数据里是数值；这里兼容字符串数字，保证排序口径稳定。"""
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return value
+
 
 class ChartService:
     def list_entries(
@@ -18,14 +35,32 @@ class ChartService:
         *,
         keyword: str | None = None,
         status: str | None = None,
+        sort_by: str | None = None,
+        order: str = "asc",
         page: int = 1,
         size: int = 20,
     ) -> tuple[list[dict[str, Any]], int]:
+        """按图表编号检索、状态过滤与排序分页。
+
+        筛选条件与查询范围同时生效：先过滤再排序再分页，翻页时同一套查询条件原样带回，
+        因此每页定位都落在同一份排序结果上。
+        """
         rows = store.rows(MODULE)
         if keyword:
+            keyword = keyword.strip()
             rows = [row for row in rows if keyword in str(row.get("图表编号", ""))]
         if status:
             rows = [row for row in rows if row.get("status") == status]
+
+        if sort_by and sort_by in SORT_FIELDS:
+            field = SORT_FIELDS[sort_by]
+            reverse = order.lower() == "desc"
+            rows = sorted(
+                rows,
+                key=lambda row: (_to_sortable(row.get(field)) is None, _to_sortable(row.get(field))),
+                reverse=reverse,
+            )
+
         total = len(rows)
         start = max(page - 1, 0) * size
         return rows[start:start + size], total
@@ -58,4 +93,9 @@ class ChartService:
         entry["status"] = target
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
+        # 图表配置状态变化后，联动看板与别的入口里的导出任务台账要同步结果状态。
+        # 延迟导入避免 chart ↔ linkage 在模块加载阶段循环依赖。
+        from app.services.linkage import linkage_service
+
+        linkage_service.sync_chart_status(entry_id, target)
         return entry, f"图表配置已{action}"
